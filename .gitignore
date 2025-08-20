@@ -1,0 +1,35 @@
+# Logs
+*.log
+logs/
+/var/log/
+
+# Backup files
+*.backup
+*.bak
+*.tar.gz
+
+# State files
+state
+*.state
+
+# Lock files
+*.lock
+*.pid
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor directories and files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
