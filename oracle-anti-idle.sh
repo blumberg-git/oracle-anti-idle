@@ -8,13 +8,17 @@
 set -euo pipefail
 
 # Configuration
-SCRIPT_VERSION="6.0.0"
-BUILD_TIME="2025-08-20 07:00:00"
+SCRIPT_VERSION="7.0.0"
+BUILD_TIME="2025-08-20 08:00:00"
 LOG_DIR="/var/log/oracle-anti-idle"
 LOG_FILE="$LOG_DIR/oracle-anti-idle.log"
 SUPERVISOR_CONF="/etc/supervisor/conf.d/oracle-anti-idle.conf"
 STATE_FILE="/var/lib/oracle-anti-idle/state"
 LOCK_FILE="/var/run/oracle-anti-idle.lock"
+GITHUB_REPO="blumberg-git/oracle-anti-idle"
+UPDATE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/oracle-anti-idle.sh"
+SCRIPT_PATH="$(readlink -f "$0")"
+BACKUP_PATH="${SCRIPT_PATH}.backup"
 
 # Default settings (15% as requested)
 DEFAULT_CPU_PERCENT=15
@@ -62,7 +66,8 @@ show_banner() {
 EOF
     echo -e "${NC}"
     echo -e "${WHITE}Never Let Your Oracle Cloud Instance Go Idle!${NC}"
-    echo -e "${CYAN}Ultra-Reliable v${SCRIPT_VERSION} | Build: ${BUILD_TIME}${NC}\n"
+    echo -e "${CYAN}Version ${SCRIPT_VERSION} | Auto-Update Enabled${NC}"
+    echo -e "${GRAY}Build: ${BUILD_TIME} | Repo: ${GITHUB_REPO}${NC}\n"
     echo -e "════════════════════════════════════════════════════════════\n"
 }
 
@@ -584,6 +589,154 @@ quick_setup() {
     fi
 }
 
+# Check for updates
+check_for_updates() {
+    echo -e "\n${CYAN}Checking for updates...${NC}\n"
+    
+    # Check if curl is available
+    if ! command -v curl &>/dev/null; then
+        echo -e "${YELLOW}curl not available, skipping update check${NC}"
+        return 1
+    fi
+    
+    # Get the latest version from GitHub
+    local temp_file="/tmp/oracle-anti-idle-latest.sh"
+    
+    if curl -s -f -L "$UPDATE_URL" -o "$temp_file" 2>/dev/null; then
+        # Extract version from downloaded file
+        local latest_version=$(grep "^SCRIPT_VERSION=" "$temp_file" | cut -d'"' -f2)
+        
+        if [[ -z "$latest_version" ]]; then
+            echo -e "${YELLOW}Could not determine latest version${NC}"
+            rm -f "$temp_file"
+            return 1
+        fi
+        
+        echo -e "Current version: ${WHITE}v${SCRIPT_VERSION}${NC}"
+        echo -e "Latest version:  ${WHITE}v${latest_version}${NC}"
+        
+        # Compare versions
+        if [[ "$latest_version" != "$SCRIPT_VERSION" ]]; then
+            echo -e "\n${GREEN}✓ Update available!${NC}"
+            echo -e "Would you like to update? (y/n): "
+            read -p "" update_confirm
+            
+            if [[ "$update_confirm" =~ ^[Yy]$ ]]; then
+                perform_update "$temp_file" "$latest_version"
+            else
+                echo -e "${YELLOW}Update skipped${NC}"
+                rm -f "$temp_file"
+            fi
+        else
+            echo -e "\n${GREEN}✓ You have the latest version${NC}"
+            rm -f "$temp_file"
+        fi
+    else
+        echo -e "${RED}Failed to check for updates${NC}"
+        echo -e "${YELLOW}Check your internet connection or try again later${NC}"
+        return 1
+    fi
+}
+
+# Perform update with rollback capability
+perform_update() {
+    local new_file="$1"
+    local new_version="$2"
+    
+    echo -e "\n${CYAN}Updating to version ${new_version}...${NC}\n"
+    
+    # Create backup
+    echo -e "Creating backup..."
+    if cp "$SCRIPT_PATH" "$BACKUP_PATH"; then
+        echo -e "  ${GREEN}✓${NC} Backup created at ${BACKUP_PATH}"
+        log "Created backup before update to v${new_version}"
+    else
+        echo -e "  ${RED}✗${NC} Failed to create backup"
+        rm -f "$new_file"
+        return 1
+    fi
+    
+    # Apply update
+    echo -e "Installing update..."
+    if cp "$new_file" "$SCRIPT_PATH"; then
+        chmod +x "$SCRIPT_PATH"
+        echo -e "  ${GREEN}✓${NC} Update installed successfully"
+        log "Updated from v${SCRIPT_VERSION} to v${new_version}"
+        
+        # Clean up
+        rm -f "$new_file"
+        
+        echo -e "\n${GREEN}════════════════════════════════════════${NC}"
+        echo -e "${GREEN}   ✓ UPDATE SUCCESSFUL!${NC}"
+        echo -e "${GREEN}════════════════════════════════════════${NC}"
+        echo -e "\nPlease restart the script to use the new version."
+        echo -e "\nChanges will be available at:"
+        echo -e "${CYAN}https://github.com/${GITHUB_REPO}/releases${NC}"
+        
+        exit 0
+    else
+        echo -e "  ${RED}✗${NC} Failed to install update"
+        echo -e "\n${YELLOW}Rolling back...${NC}"
+        
+        # Rollback
+        if cp "$BACKUP_PATH" "$SCRIPT_PATH"; then
+            chmod +x "$SCRIPT_PATH"
+            echo -e "  ${GREEN}✓${NC} Rollback successful"
+            log "Update failed, rolled back to v${SCRIPT_VERSION}"
+        else
+            echo -e "  ${RED}✗${NC} Rollback failed!"
+            echo -e "${RED}Manual intervention required!${NC}"
+            echo -e "Backup is at: ${BACKUP_PATH}"
+        fi
+        
+        rm -f "$new_file"
+        return 1
+    fi
+}
+
+# Auto-update check (non-interactive)
+auto_update_check() {
+    # Only check once per day to avoid annoying users
+    local last_check_file="/var/lib/oracle-anti-idle/last_update_check"
+    
+    # Create directory if it doesn't exist
+    mkdir -p "$(dirname "$last_check_file")" 2>/dev/null || true
+    
+    # Check if we've already checked today
+    if [[ -f "$last_check_file" ]]; then
+        local last_check=$(cat "$last_check_file" 2>/dev/null || echo "0")
+        local current_time=$(date +%s)
+        local time_diff=$((current_time - last_check))
+        
+        # 86400 seconds = 24 hours
+        if [[ $time_diff -lt 86400 ]]; then
+            return 0
+        fi
+    fi
+    
+    # Check for updates silently
+    if command -v curl &>/dev/null; then
+        local temp_file="/tmp/oracle-anti-idle-check.sh"
+        
+        if curl -s -f -L "$UPDATE_URL" -o "$temp_file" 2>/dev/null; then
+            local latest_version=$(grep "^SCRIPT_VERSION=" "$temp_file" | cut -d'"' -f2)
+            
+            if [[ -n "$latest_version" ]] && [[ "$latest_version" != "$SCRIPT_VERSION" ]]; then
+                echo -e "\n${YELLOW}╔══════════════════════════════════════════╗${NC}"
+                echo -e "${YELLOW}║  📦 Update Available: v${latest_version}          ║${NC}"
+                echo -e "${YELLOW}║  Run option 6 to update                  ║${NC}"
+                echo -e "${YELLOW}╚══════════════════════════════════════════╝${NC}\n"
+                sleep 2
+            fi
+            
+            rm -f "$temp_file"
+        fi
+        
+        # Update last check time
+        date +%s > "$last_check_file" 2>/dev/null || true
+    fi
+}
+
 # Health check
 health_check() {
     echo -e "\n${CYAN}Running health check...${NC}\n"
@@ -663,9 +816,10 @@ main_menu() {
         echo -e "  ${WHITE}3)${NC} Customize Settings"
         echo -e "  ${WHITE}4)${NC} Quick Setup (Recommended)"
         echo -e "  ${WHITE}5)${NC} Health Check"
+        echo -e "  ${WHITE}6)${NC} Check for Updates 🔄"
         echo -e "  ${WHITE}0)${NC} Exit\n"
         
-        read -p "Select option [0-5]: " choice
+        read -p "Select option [0-6]: " choice
         
         case $choice in
             1) toggle_antidle; sleep 2 ;;
@@ -673,6 +827,7 @@ main_menu() {
             3) customize ;;
             4) quick_setup ;;
             5) health_check; read -p "Press Enter to continue..." ;;
+            6) check_for_updates; read -p "Press Enter to continue..." ;;
             0) 
                 echo -e "\n${GREEN}Thank you for using Oracle Anti-Idle!${NC}"
                 echo -e "${CYAN}Your protection remains active even after exiting.${NC}\n"
@@ -703,6 +858,9 @@ main() {
     # Run a quick health check
     echo -e "${CYAN}Performing system health check...${NC}"
     health_check > /dev/null 2>&1
+    
+    # Check for updates (silently, once per day)
+    auto_update_check
     
     main_menu
 }
